@@ -1,0 +1,376 @@
+"""
+麻醉部值班工作表 → 詳細班表上傳表 轉換程式
+"""
+
+import pandas as pd
+import re
+import sys
+from collections import defaultdict
+
+def parse_support_field(val):
+    """Parse support field that may contain multiple doctor codes, possibly with parentheses."""
+    if pd.isna(val) or str(val).strip() == '':
+        return []
+    val = str(val).strip()
+    # Remove parentheses and extract uppercase letters
+    codes = re.findall(r'[A-Z]', val)
+    return codes
+
+def cell_content(val):
+    """Return stripped string of cell value, or empty string if NaN."""
+    if pd.isna(val):
+        return ''
+    return str(val).strip()
+
+def strip_parens(val):
+    """Remove parentheses from cell value and return core content."""
+    s = cell_content(val)
+    return s.replace('(', '').replace(')', '').strip()
+
+def main():
+    # ── 1. Read files ──────────────────────────────────────────────────────────
+    df_raw = pd.read_csv('/content/麻醉部值班工作表 - 202604.csv',
+                         header=None, encoding='utf-8-sig')
+
+    # ── 2. Parse legend: code → (name, emp_id) ────────────────────────────────
+    # Column 41 has entries like "A陳建全4792"
+    code_info = {}  # code -> {'name': str, 'emp_id': str}
+    for i in range(len(df_raw)):
+        raw = cell_content(df_raw.iloc[i, 41])
+        if raw and len(raw) >= 2 and raw[0].isupper():
+            m = re.match(r'([A-Z])(.+?)(\d{4,})', raw)
+            if m:
+                code = m.group(1)
+                name = m.group(2)
+                emp_id = m.group(3)
+                code_info[code] = {'name': name, 'emp_id': emp_id}
+
+    print("== 解析到的主治醫師 ==")
+    for code, info in sorted(code_info.items()):
+        print(f"  {code}: {info['name']} ({info['emp_id']})")
+
+    # ── 3. Identify header row (row index 2) ──────────────────────────────────
+    header_row = df_raw.iloc[2]
+    code_row   = df_raw.iloc[1]
+
+    # Find 淡水 column
+    danshui_col = None
+    for c in range(len(header_row)):
+        if cell_content(header_row.iloc[c]) == '淡水':
+            danshui_col = c
+            break
+    if danshui_col is None:
+        raise ValueError("找不到「淡水」欄位，請確認原始表格格式")
+    print(f"\n「淡水」位於欄位索引: {danshui_col}")
+
+    # ── 4. Map each doctor code to their column index ─────────────────────────
+    code_col = {}  # code -> column index
+    for c in range(len(code_row)):
+        v = cell_content(code_row.iloc[c])
+        if v and v.isupper() and len(v) == 1:
+            code_col[v] = c
+
+    # Determine which codes are 台北 vs 淡水 doctors
+    taipei_codes   = set()
+    danshui_codes  = set()
+    for code, col in code_col.items():
+        if col < danshui_col:
+            taipei_codes.add(code)
+        else:
+            danshui_codes.add(code)
+
+    print(f"\n台北醫師: {sorted(taipei_codes)}")
+    print(f"淡水醫師: {sorted(danshui_codes)}")
+
+    # ── 5. Identify special column positions ──────────────────────────────────
+    # Taipei side: 值班V=col2, 值班R=col3, 門診V=col4, 支援=col24, 白班R=col25
+    # Danshui side: 值班V=col28, 值班R=col29, 門診V=col30, 支援=col39, 白班R=col40
+    tp_duty_v_col  = None  # 台北值班V
+    tp_opd_v_col   = None  # 台北門診V
+    tp_support_col = None  # 台北支援 (淡水→台北)
+    ds_duty_v_col  = None  # 淡水值班V
+    ds_opd_v_col   = None  # 淡水門診V
+    ds_support_col = None  # 淡水支援 (台北→淡水)
+
+    # Find by label in header row
+    for c in range(len(header_row)):
+        label = cell_content(header_row.iloc[c])
+        if label == '值班V' and c < danshui_col:
+            tp_duty_v_col = c
+        elif label == '門診V' and c < danshui_col:
+            tp_opd_v_col = c
+        elif label == '支援' and c < danshui_col:
+            tp_support_col = c
+        elif label == '值班V' and c >= danshui_col:
+            ds_duty_v_col = c
+        elif label == '門診V' and c >= danshui_col:
+            ds_opd_v_col = c
+        elif label == '支援' and c >= danshui_col:
+            ds_support_col = c
+
+    print(f"\n台北值班V列: {tp_duty_v_col}, 台北門診V列: {tp_opd_v_col}, 台北支援列: {tp_support_col}")
+    print(f"淡水值班V列: {ds_duty_v_col}, 淡水門診V列: {ds_opd_v_col}, 淡水支援列: {ds_support_col}")
+
+    # ── 6. Find ICU doctor (code X) ───────────────────────────────────────────
+    icu_code = 'X'
+    icu_info = code_info.get(icu_code)
+    if icu_info:
+        print(f"\nICU醫師: {icu_code} = {icu_info['name']} ({icu_info['emp_id']})")
+
+    # ── 7. Parse data rows ────────────────────────────────────────────────────
+    data_rows = []
+    for i in range(3, len(df_raw)):
+        day_val = cell_content(df_raw.iloc[i, 0])
+        if not day_val or not str(day_val).strip().isdigit():
+            continue
+        day = int(day_val)
+        data_rows.append((day, i))
+
+    num_days = max(d for d, _ in data_rows)
+    print(f"\n共 {num_days} 天")
+
+    # ── 8. Build day-indexed lookup ───────────────────────────────────────────
+    day_row = {d: r for d, r in data_rows}
+
+    def get_day_row(day):
+        return day_row.get(day)
+
+    def get_cell(day, col):
+        r = get_day_row(day)
+        if r is None:
+            return ''
+        return cell_content(df_raw.iloc[r, col])
+
+    def get_tp_duty_v(day):
+        return strip_parens(get_cell(day, tp_duty_v_col))
+
+    def get_ds_duty_v(day):
+        return strip_parens(get_cell(day, ds_duty_v_col))
+
+    def get_tp_opd_v(day):
+        return strip_parens(get_cell(day, tp_opd_v_col))
+
+    def get_ds_opd_v(day):
+        return strip_parens(get_cell(day, ds_opd_v_col))
+
+    def get_tp_support(day):
+        """Returns list of codes: 淡水 doctors coming to 台北 support."""
+        return parse_support_field(get_cell(day, tp_support_col))
+
+    def get_ds_support(day):
+        """Returns list of codes: 台北 doctors going to 淡水 support."""
+        return parse_support_field(get_cell(day, ds_support_col))
+
+    def get_doctor_cell(day, code):
+        """Get a doctor's own cell for a given day."""
+        col = code_col.get(code)
+        if col is None:
+            return ''
+        return strip_parens(get_cell(day, col))
+
+    # ── 9. Determine OPD presence ─────────────────────────────────────────────
+    def in_opd(day, code):
+        """Check if doctor appears in any OPD column (台北 or 淡水 門診V)."""
+        return (get_tp_opd_v(day) == code or get_ds_opd_v(day) == code)
+
+    # ── 10. Main conversion logic ─────────────────────────────────────────────
+    conflicts = []  # [(emp_id, name, day, symbols)]
+    results = {}    # emp_id -> {day -> symbol}
+
+    all_codes = sorted(code_info.keys())
+
+    for code in all_codes:
+        info = code_info[code]
+        emp_id = info['emp_id']
+        name   = info['name']
+        is_taipei   = code in taipei_codes
+        is_danshui  = code in danshui_codes
+        is_icu      = (code == icu_code)
+
+        day_symbols = {}  # day -> symbol string
+
+        # ICU doctor: mark all days as %
+        if is_icu:
+            for day in range(1, num_days + 1):
+                day_symbols[day] = '%'
+            results[emp_id] = {'name': name, 'code': code, 'schedule': day_symbols}
+            continue
+
+        for day in range(1, num_days + 1):
+            cell = get_doctor_cell(day, code)
+            tp_duty = get_tp_duty_v(day)
+            ds_duty = get_ds_duty_v(day)
+            tp_sup  = get_tp_support(day)   # 淡水 doctors supporting 台北
+            ds_sup  = get_ds_support(day)   # 台北 doctors supporting 淡水
+            opd     = in_opd(day, code)
+
+            symbols = []
+
+            # ── Rule 4: # → P, * → v (applies to all doctors) ──────────────
+            if cell == '#':
+                symbols.append('P')
+            elif cell == '*':
+                symbols.append('v')
+
+            # ── 台北主院區醫師 ─────────────────────────────────────────────
+            elif is_taipei:
+                # Rule 1: own code in cell
+                if cell == code:
+                    if tp_duty == code:
+                        # DN1 and next day T
+                        symbols.append('DN1')
+                        next_day = day + 1
+                        if next_day <= num_days:
+                            if next_day in day_symbols:
+                                existing = day_symbols[next_day]
+                                if 'T' not in existing:
+                                    day_symbols[next_day] = existing + ',T' if existing else 'T'
+                            else:
+                                day_symbols[next_day] = 'T'
+                    else:
+                        symbols.append('D1')
+
+                # Rule 3: > means at 淡水
+                elif cell == '>':
+                    if ds_duty == code:
+                        symbols.append('DN2')
+                        next_day = day + 1
+                        if next_day <= num_days:
+                            if next_day in day_symbols:
+                                existing = day_symbols[next_day]
+                                if 'T' not in existing:
+                                    day_symbols[next_day] = existing + ',T' if existing else 'T'
+                            else:
+                                day_symbols[next_day] = 'T'
+                    else:
+                        symbols.append('D2')
+
+                # Rule 5: blank
+                elif cell == '':
+                    if tp_duty == code:
+                        # N1 and next day T
+                        symbols.append('N1')
+                        next_day = day + 1
+                        if next_day <= num_days:
+                            if next_day in day_symbols:
+                                existing = day_symbols[next_day]
+                                if 'T' not in existing:
+                                    day_symbols[next_day] = existing + ',T' if existing else 'T'
+                            else:
+                                day_symbols[next_day] = 'T'
+                    elif opd:
+                        symbols.append('O')
+
+            # ── 淡水主院區醫師 ─────────────────────────────────────────────
+            elif is_danshui:
+                # Rule 1: own code in cell
+                if cell == code:
+                    if ds_duty == code:
+                        symbols.append('DN2')
+                        next_day = day + 1
+                        if next_day <= num_days:
+                            if next_day in day_symbols:
+                                existing = day_symbols[next_day]
+                                if 'T' not in existing:
+                                    day_symbols[next_day] = existing + ',T' if existing else 'T'
+                            else:
+                                day_symbols[next_day] = 'T'
+                    else:
+                        symbols.append('D2')
+
+                # Rule 3: < means at 台北
+                elif cell == '<':
+                    if tp_duty == code:
+                        symbols.append('DN1')
+                        next_day = day + 1
+                        if next_day <= num_days:
+                            if next_day in day_symbols:
+                                existing = day_symbols[next_day]
+                                if 'T' not in existing:
+                                    day_symbols[next_day] = existing + ',T' if existing else 'T'
+                            else:
+                                day_symbols[next_day] = 'T'
+                    else:
+                        symbols.append('D1')
+
+                # Rule 5: blank
+                elif cell == '':
+                    if opd:
+                        symbols.append('O')
+
+            # Assign today's symbol if not already set by a previous "next_day" assignment
+            if symbols:
+                today_sym = ','.join(symbols)
+                if day in day_symbols:
+                    # Merge with existing (e.g., a T from previous night + today's D1/O)
+                    existing = day_symbols[day]
+                    # Combine, avoiding duplicate T
+                    merged = merge_symbols(existing, today_sym)
+                    day_symbols[day] = merged
+                    if ',' in merged:
+                        conflicts.append((emp_id, name, day, merged))
+                else:
+                    day_symbols[day] = today_sym
+            # else: day_symbols[day] may already be set (from T rollover), leave it
+
+        # Rule 3: fill remaining blank days with V
+        for day in range(1, num_days + 1):
+            if day not in day_symbols or day_symbols[day] == '':
+                day_symbols[day] = 'V'
+
+        results[emp_id] = {'name': name, 'code': code, 'schedule': day_symbols}
+
+    return results, num_days, conflicts, code_info
+
+
+def merge_symbols(existing, new_sym):
+    """Merge two symbol strings, avoiding duplicates."""
+    parts_existing = [s.strip() for s in existing.split(',') if s.strip()]
+    parts_new      = [s.strip() for s in new_sym.split(',') if s.strip()]
+    combined = parts_existing.copy()
+    for p in parts_new:
+        if p not in combined:
+            combined.append(p)
+    return ','.join(combined)
+
+
+def write_output(results, num_days, conflicts, code_info):
+    # Build output rows ordered by emp_id (matching original file order)
+    # Use order from code_info
+    ordered_codes = sorted(code_info.keys())
+    
+    rows = []
+    header = ['員工代碼', '姓名'] + [str(d) for d in range(1, num_days + 1)]
+    rows.append(header)
+
+    for code in ordered_codes:
+        info = code_info[code]
+        emp_id = info['emp_id']
+        name = info['name']
+        if emp_id not in results:
+            continue
+        sched = results[emp_id]['schedule']
+        row = [emp_id, name] + [sched.get(d, 'V') for d in range(1, num_days + 1)]
+        rows.append(row)
+
+    df_out = pd.DataFrame(rows[1:], columns=rows[0])
+    out_path = '詳細班表上傳表_轉換結果.csv'
+    df_out.to_csv(out_path, index=False, encoding='utf-8-sig')
+    print(f"\n✅ 輸出已儲存至: {out_path}")
+
+    # Print the table
+    print("\n== 轉換結果預覽 ==")
+    print(df_out.to_string(index=False))
+
+    # Report conflicts
+    if conflicts:
+        print("\n⚠️  以下日期同一位醫師有多個符號（已用逗號合併），請人工確認：")
+        for emp_id, name, day, syms in conflicts:
+            print(f"   {emp_id} {name} 第{day}天: {syms}")
+    else:
+        print("\n✅ 無符號衝突")
+
+
+if __name__ == '__main__':
+    results, num_days, conflicts, code_info = main()
+    write_output(results, num_days, conflicts, code_info)
