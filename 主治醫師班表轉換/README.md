@@ -17,14 +17,14 @@ Google Colab（或任何支援 Python 3 + pandas 的環境）
 在 Colab 左側檔案欄上傳以下三個檔案（上傳至 `/content/`）：
 
 - `202604麻醉部值班工作表.csv`
-- `convert_schedule_colab.py`
+- `attending_convert_schedule.py`
 
 ### 2. 執行程式
 
 在 Colab 儲存格執行：
 
 ```python
-exec(open('convert_schedule_colab.py').read())
+exec(open('attending_convert_schedule.py').read())
 ```
 
 ### 3. 下載結果
