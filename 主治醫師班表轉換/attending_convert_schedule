@@ -174,8 +174,9 @@ def main():
         return (get_tp_opd_v(day) == code or get_ds_opd_v(day) == code)
 
     # ── 10. Main conversion logic ─────────────────────────────────────────────
-    conflicts = []  # [(emp_id, name, day, symbols)]
-    results = {}    # emp_id -> {day -> symbol}
+    conflicts = []   # [(emp_id, name, day, symbols)]
+    anomalies = []   # [(emp_id, name, day, description)]
+    results = {}     # emp_id -> {day -> symbol}
 
     all_codes = sorted(code_info.keys())
 
@@ -260,6 +261,12 @@ def main():
                                 day_symbols[next_day] = 'T'
                     elif opd:
                         symbols.append('O')
+                    else:
+                        # Anomaly: blank own cell but appears in opposite zone's duty V or support
+                        if ds_duty == code:
+                            anomalies.append((emp_id, name, day, f'自己欄位空白，但出現在淡水值班V'))
+                        elif code in tp_sup:
+                            anomalies.append((emp_id, name, day, f'自己欄位空白，但出現在台北支援欄（淡水→台北）'))
 
             # ── 淡水主院區醫師 ─────────────────────────────────────────────
             elif is_danshui:
@@ -297,6 +304,12 @@ def main():
                 elif cell == '':
                     if opd:
                         symbols.append('O')
+                    else:
+                        # Anomaly: blank own cell but appears in opposite zone's duty V or support
+                        if tp_duty == code:
+                            anomalies.append((emp_id, name, day, f'自己欄位空白，但出現在台北值班V'))
+                        elif code in ds_sup:
+                            anomalies.append((emp_id, name, day, f'自己欄位空白，但出現在淡水支援欄（台北→淡水）'))
 
             # Assign today's symbol if not already set by a previous "next_day" assignment
             if symbols:
@@ -320,7 +333,7 @@ def main():
 
         results[emp_id] = {'name': name, 'code': code, 'schedule': day_symbols}
 
-    return results, num_days, conflicts, code_info
+    return results, num_days, conflicts, anomalies, code_info
 
 
 def merge_symbols(existing, new_sym):
@@ -334,7 +347,7 @@ def merge_symbols(existing, new_sym):
     return ','.join(combined)
 
 
-def write_output(results, num_days, conflicts, code_info):
+def write_output(results, num_days, conflicts, anomalies, code_info):
     # Build output rows ordered by emp_id (matching original file order)
     # Use order from code_info
     ordered_codes = sorted(code_info.keys())
@@ -362,6 +375,14 @@ def write_output(results, num_days, conflicts, code_info):
     print("\n== 轉換結果預覽 ==")
     print(df_out.to_string(index=False))
 
+    # Report anomalies
+    if anomalies:
+        print("\n⚠️  以下醫師當天自己欄位空白，但出現在對方院區的值班V或支援欄，請人工確認：")
+        for emp_id, name, day, desc in anomalies:
+            print(f"   {emp_id} {name} 第{day}天: {desc}")
+    else:
+        print("\n✅ 無跨區異常")
+
     # Report conflicts
     if conflicts:
         print("\n⚠️  以下日期同一位醫師有多個符號（已用逗號合併），請人工確認：")
@@ -372,5 +393,5 @@ def write_output(results, num_days, conflicts, code_info):
 
 
 if __name__ == '__main__':
-    results, num_days, conflicts, code_info = main()
-    write_output(results, num_days, conflicts, code_info)
+    results, num_days, conflicts, anomalies, code_info = main()
+    write_output(results, num_days, conflicts, anomalies, code_info)
