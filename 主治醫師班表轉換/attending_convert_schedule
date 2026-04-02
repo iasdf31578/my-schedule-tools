@@ -29,8 +29,8 @@ def strip_parens(val):
 
 def main():
     # ── 1. Read files ──────────────────────────────────────────────────────────
-    df_raw = pd.read_csv('/content/麻醉部值班工作表 - 202604.csv',
-                         header=None, encoding='utf-8-sig')
+    df_raw = pd.read_csv('202604麻醉部值班工作表.csv',
+                         header=None, encoding='big5')
 
     # ── 2. Parse legend: code → (name, emp_id) ────────────────────────────────
     # Column 41 has entries like "A陳建全4792"
@@ -86,6 +86,7 @@ def main():
     # Taipei side: 值班V=col2, 值班R=col3, 門診V=col4, 支援=col24, 白班R=col25
     # Danshui side: 值班V=col28, 值班R=col29, 門診V=col30, 支援=col39, 白班R=col40
     tp_duty_v_col  = None  # 台北值班V
+    tp_duty_r_col  = None  # 台北值班R
     tp_opd_v_col   = None  # 台北門診V
     tp_support_col = None  # 台北支援 (淡水→台北)
     ds_duty_v_col  = None  # 淡水值班V
@@ -97,6 +98,8 @@ def main():
         label = cell_content(header_row.iloc[c])
         if label == '值班V' and c < danshui_col:
             tp_duty_v_col = c
+        elif label == '值班R' and c < danshui_col:
+            tp_duty_r_col = c
         elif label == '門診V' and c < danshui_col:
             tp_opd_v_col = c
         elif label == '支援' and c < danshui_col:
@@ -288,7 +291,16 @@ def main():
                 # Rule 3: < means at 台北
                 elif cell == '<':
                     if tp_duty == code:
-                        symbols.append('DN1')
+                        # 有住院醫師值班R = 平日 → N1（只需晚上）並提醒
+                        # 無住院醫師值班R = 假日 → DN1（白天晚上都要上班）
+                        r = get_day_row(day)
+                        tp_r_val = strip_parens(df_raw.iloc[r, tp_duty_r_col]) if r else ''
+                        is_weekday = bool(tp_r_val)
+                        if is_weekday:
+                            symbols.append('N1')
+                            anomalies.append((emp_id, name, day, '淡水醫師當天在台北值班V（平日，標記為N1），請確認當天是否需要上白班'))
+                        else:
+                            symbols.append('DN1')
                         next_day = day + 1
                         if next_day <= num_days:
                             if next_day in day_symbols:
