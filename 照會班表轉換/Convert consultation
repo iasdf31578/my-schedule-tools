@@ -1,0 +1,185 @@
+"""
+麻醉部值班工作表 → 照會班表 轉換程式
+
+邏輯：
+  平日：
+    白天會診V = 當天二線V（台北/淡水各自）
+    白天會診R = 當天值班R（台北/淡水各自）
+    夜間會診V = 當天值班V
+    夜間會診R = 當天值班R
+  假日（六、日及國定假日）：
+    白天會診V = 夜間會診V = 當天值班V
+    （不填R欄）
+"""
+
+import pandas as pd
+import re
+
+# ── 可調整：國定假日（格式：日期數字，例如 4 代表 4/4）──────────────────────────
+# 2026年4月：清明節4/4為週六已是假日，無補假
+NATIONAL_HOLIDAYS = set()  # 若有補假或特殊假日在此加入，例如 {3} 代表4/3
+
+# 注意：本科國定假日目前均無住院醫師值班（值班R為空），
+# 因此程式以「有無值班R」判斷白天V用二線或值班V，
+# 國定假日會自動走與六日相同的路徑，無需額外設定。
+# 若未來國定假日開始排住院醫師值班，請將該日加入 NATIONAL_HOLIDAYS。
+
+# ──────────────────────────────────────────────────────────────────────────────
+
+def cell_content(val):
+    if pd.isna(val):
+        return ''
+    return str(val).strip()
+
+def strip_parens(val):
+    s = cell_content(val)
+    return s.replace('(', '').replace(')', '').strip()
+
+def main():
+    df = pd.read_csv('202604麻醉部值班工作表.csv', header=None, encoding='big5')
+
+    # ── 1. Parse doctor/resident legends ─────────────────────────────────────
+    # Attending (col 41): "A陳建全4792"
+    # Resident  (col 42): "j郭孟協6313"
+    code_to_empid = {}  # 'A' -> '4792', 'j' -> '6313', etc.
+
+    for i in range(len(df)):
+        for col in [41, 42]:
+            raw = cell_content(df.iloc[i, col])
+            if not raw:
+                continue
+            m = re.match(r'([A-Za-z])(.+?)(\d{4,})', raw)
+            if m:
+                code_to_empid[m.group(1)] = m.group(3)
+
+    print("== 代號 → 員工編號 ==")
+    for k, v in sorted(code_to_empid.items()):
+        print(f"  {k}: {v}")
+
+    # ── 2. Find key column positions ──────────────────────────────────────────
+    header_row = df.iloc[2]
+
+    danshui_col = None
+    for c in range(len(header_row)):
+        if cell_content(header_row.iloc[c]) == '淡水':
+            danshui_col = c
+            break
+    if danshui_col is None:
+        raise ValueError("找不到「淡水」欄位")
+
+    tp_duty_v_col = tp_duty_r_col = tp_second_col = None
+    ds_duty_v_col = ds_duty_r_col = ds_second_col = None
+
+    for c in range(len(header_row)):
+        label = cell_content(header_row.iloc[c])
+        if c < danshui_col:
+            if label == '值班V':  tp_duty_v_col = c
+            elif label == '值班R': tp_duty_r_col = c
+            elif label == '二線':  tp_second_col = c
+        else:
+            if label == '值班V':  ds_duty_v_col = c
+            elif label == '值班R': ds_duty_r_col = c
+            elif label == '二線':  ds_second_col = c
+
+    print(f"\n台北 值班V={tp_duty_v_col}, 值班R={tp_duty_r_col}, 二線={tp_second_col}")
+    print(f"淡水 值班V={ds_duty_v_col}, 值班R={ds_duty_r_col}, 二線={ds_second_col}")
+
+    # ── 3. Parse data rows ────────────────────────────────────────────────────
+    HOLIDAY_WEEKDAYS = {'六', '日'}
+
+    rows_data = []
+    for i in range(3, len(df)):
+        day_val = cell_content(df.iloc[i, 0])
+        if not day_val or not day_val.isdigit():
+            continue
+        day     = int(day_val)
+        weekday = cell_content(df.iloc[i, 1])
+        is_holiday = (weekday in HOLIDAY_WEEKDAYS) or (day in NATIONAL_HOLIDAYS)
+
+        def get(col):
+            return strip_parens(df.iloc[i, col])
+
+        tp_v = get(tp_duty_v_col)
+        tp_r = get(tp_duty_r_col)
+        tp_2 = get(tp_second_col)
+        ds_v = get(ds_duty_v_col)
+        ds_r = get(ds_duty_r_col)
+        ds_2 = get(ds_second_col)
+
+        def lookup(code):
+            """Convert single-char code to emp_id, blank if no code."""
+            if not code or code == 'nan':
+                return ''
+            emp = code_to_empid.get(code, f'?{code}')
+            # Return as plain integer string (no .0)
+            try:
+                return str(int(float(emp)))
+            except ValueError:
+                return emp
+
+        if is_holiday:
+            # 假日：日夜相同，只填V
+            rows_data.append({
+                'day': day, 'weekday': weekday, 'is_holiday': True,
+                'tp_day_v':  lookup(tp_v), 'tp_day_r':  '',
+                'tp_night_v': lookup(tp_v), 'tp_night_r': '',
+                'ds_day_v':  lookup(ds_v), 'ds_day_r':  '',
+                'ds_night_v': lookup(ds_v), 'ds_night_r': '',
+            })
+        else:
+            # 平日：若有值班R，白天V用二線；若無值班R，白天V也用值班V
+            tp_day_v = lookup(tp_2) if tp_r else lookup(tp_v)
+            ds_day_v = lookup(ds_2) if ds_r else lookup(ds_v)
+            rows_data.append({
+                'day': day, 'weekday': weekday, 'is_holiday': False,
+                'tp_day_v':  tp_day_v,    'tp_day_r':  lookup(tp_r),
+                'tp_night_v': lookup(tp_v), 'tp_night_r': lookup(tp_r),
+                'ds_day_v':  ds_day_v,    'ds_day_r':  lookup(ds_r),
+                'ds_night_v': lookup(ds_v), 'ds_night_r': lookup(ds_r),
+            })
+
+    num_days = max(r['day'] for r in rows_data)
+    day_lookup = {r['day']: r for r in rows_data}
+
+    # ── 4. Build output in same format as reference ───────────────────────────
+    # Header row: 科別代碼, 地點, 院區, 班別, 人員, 順序, 1, 2, ..., 30
+    header = ['科別代碼', '地點', '院區', '班別', '人員', '順序'] + list(range(1, num_days + 1))
+
+    def build_row(zone, shift, role, field_key):
+        """Build one output row."""
+        vals = ['81', '', zone, shift, role, '']
+        for d in range(1, num_days + 1):
+            r = day_lookup.get(d)
+            vals.append(r[field_key] if r else '')
+        return vals
+
+    output_rows = [
+        build_row('台北', '日', '主治', 'tp_day_v'),
+        build_row('台北', '日', '住院', 'tp_day_r'),
+        build_row('台北', '夜', '主治', 'tp_night_v'),
+        build_row('台北', '夜', '住院', 'tp_night_r'),
+        build_row('淡水', '日', '主治', 'ds_day_v'),
+        build_row('淡水', '日', '住院', 'ds_day_r'),
+        build_row('淡水', '夜', '主治', 'ds_night_v'),
+        build_row('淡水', '夜', '住院', 'ds_night_r'),
+    ]
+
+    df_out = pd.DataFrame(output_rows, columns=header)
+
+    out_path = '照會班表_轉換結果.csv'
+    df_out.to_csv(out_path, index=False, encoding='utf-8-sig')
+    print(f"\n✅ 輸出已儲存至: {out_path}")
+
+    # ── 5. Print preview ──────────────────────────────────────────────────────
+    print("\n== 轉換結果預覽 ==")
+    print(df_out.to_string(index=False))
+
+    # ── 6. Print holiday summary ──────────────────────────────────────────────
+    holidays = [r['day'] for r in rows_data if r['is_holiday']]
+    print(f"\n假日（只填值班V）：{holidays}")
+    if NATIONAL_HOLIDAYS:
+        print(f"另計國定假日：{sorted(NATIONAL_HOLIDAYS)}")
+
+
+if __name__ == '__main__':
+    main()
