@@ -12,32 +12,25 @@ Google Colab（或任何支援 Python 3 + pandas 的環境）
 
 ## 使用步驟
 
-### 1. 上傳檔案
+### 1. 上傳 CSV
 
-在 Colab 左側檔案欄上傳以下兩個檔案（上傳至 `/content/`）：
+在 Colab 左側檔案欄，將當月的值班工作表 CSV 上傳至 `/content/`。
 
-- `202604麻醉部值班工作表.csv`
-- `convert_consultation_colab.py`
+### 2. 貼上程式碼
 
-### 2. 修改檔名（換月時）
+在 Colab 新增一個儲存格，將程式碼完整複製貼上。
 
-程式第 39 行預設讀取 `202604麻醉部值班工作表.csv`，換月時請對應修改：
+### 3. 換月時修改檔名
 
-```python
-df = pd.read_csv('202604麻醉部值班工作表.csv', ...)
-# 改為例如：
-df = pd.read_csv('202605麻醉部值班工作表.csv', ...)
-```
-
-### 3. 執行程式
+貼上後找到程式碼中的這一行，將檔名改為當月的檔案：
 
 ```python
-exec(open('convert_consultation_colab.py').read())
+df = pd.read_csv('202604麻醉部值班工作表.csv', header=None, encoding='big5')
 ```
 
-### 4. 下載結果
+### 4. 執行並下載結果
 
-執行完成後，左側檔案欄會出現 `照會班表_轉換結果.csv`，右鍵點擊下載。
+執行儲存格後，左側檔案欄會出現 `照會班表_轉換結果.csv`，右鍵點擊下載。
 
 ---
 
@@ -71,7 +64,7 @@ exec(open('convert_consultation_colab.py').read())
 
 ## 編碼問題排除
 
-若開啟 CSV 出現亂碼，或執行時讀檔報錯，請將程式中的 `utf-8-sig` 與 `big5` 互換後重試。
+若開啟 CSV 出現亂碼，或執行時讀檔報錯，請將程式碼中的 `utf-8-sig` 與 `big5` 互換後重試。
 
 ---
 
