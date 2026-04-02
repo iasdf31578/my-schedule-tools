@@ -1,0 +1,111 @@
+"""
+麻醉部值班工作表 → 門診表 轉換程式
+
+來源欄位（台北）：門診V → 門診R → 白班R（依序取第一個有值的）
+來源欄位（淡水）：門診V → 門診R → 白班R（依序取第一個有值的）
+輸出格式：日期 | 台北（員工編號 姓名）| 淡水（員工編號 姓名）
+"""
+
+import pandas as pd
+import re
+
+def cell_content(val):
+    if pd.isna(val):
+        return ''
+    return str(val).strip()
+
+def strip_parens(val):
+    return cell_content(val).replace('(', '').replace(')', '').strip()
+
+def first_code(val):
+    """從白班R欄位（可能含多個代號如 'krm(s)'）取第一個英文字母。"""
+    s = cell_content(val)
+    m = re.search(r'[A-Za-z]', s)
+    return m.group(0) if m else ''
+
+# ── 請依當月修改 ────────────────────────────────────────────────────────────
+YEAR  = 2026
+MONTH = 4
+# ──────────────────────────────────────────────────────────────────────────────
+
+def main():
+    df = pd.read_csv('202604麻醉部值班工作表.csv', header=None, encoding='big5')
+
+    # ── 1. 解析代號對照表 ─────────────────────────────────────────────────────
+    # 主治醫師 col 41：A陳建全4792
+    # 住院醫師 col 42：j郭孟協6313
+    code_info = {}
+    for i in range(len(df)):
+        for col in [41, 42]:
+            raw = cell_content(df.iloc[i, col])
+            if not raw:
+                continue
+            m = re.match(r'([A-Za-z])(.+?)(\d{4,})', raw)
+            if m:
+                code_info[m.group(1)] = {'name': m.group(2), 'emp_id': m.group(3)}
+
+    # ── 2. 找欄位位置 ─────────────────────────────────────────────────────────
+    header_row = df.iloc[2]
+    danshui_col = None
+    for c in range(len(header_row)):
+        if cell_content(header_row.iloc[c]) == '淡水':
+            danshui_col = c
+            break
+    if danshui_col is None:
+        raise ValueError("找不到「淡水」欄位")
+
+    tp_opd_v_col = tp_opd_r_col = tp_wban_r_col = None
+    ds_opd_v_col = ds_opd_r_col = ds_wban_r_col = None
+
+    for c in range(len(header_row)):
+        label = cell_content(header_row.iloc[c])
+        if c < danshui_col:
+            if label == '門診V':  tp_opd_v_col = c
+            elif label == '門診R': tp_opd_r_col = c
+            elif label == '白班R': tp_wban_r_col = c
+        else:
+            if label == '門診V':  ds_opd_v_col = c
+            elif label == '門診R': ds_opd_r_col = c
+            elif label == '白班R': ds_wban_r_col = c
+
+    # ── 3. 產生門診表 ─────────────────────────────────────────────────────────
+    def lookup(code):
+        info = code_info.get(code)
+        if not info:
+            return ''
+        return f"{info['emp_id']} {info['name']}"
+
+    rows = []
+    for i in range(3, len(df)):
+        day_val = cell_content(df.iloc[i, 0])
+        if not day_val or not day_val.isdigit():
+            continue
+        day = int(day_val)
+
+        # 台北：門診V → 門診R → 白班R 第一個字
+        tp_code = (strip_parens(df.iloc[i, tp_opd_v_col]) or
+                   strip_parens(df.iloc[i, tp_opd_r_col]) or
+                   first_code(df.iloc[i, tp_wban_r_col]))
+
+        # 淡水：門診V → 門診R → 白班R 第一個字
+        ds_code = (strip_parens(df.iloc[i, ds_opd_v_col]) or
+                   strip_parens(df.iloc[i, ds_opd_r_col]) or
+                   first_code(df.iloc[i, ds_wban_r_col]))
+
+        rows.append({
+            '日期':  f'{YEAR}/{MONTH}/{day}',
+            '台北':  lookup(tp_code),
+            '淡水':  lookup(ds_code),
+        })
+
+    df_out = pd.DataFrame(rows, columns=['日期', '台北', '淡水'])
+
+    out_path = '門診表_轉換結果.csv'
+    df_out.to_csv(out_path, index=False, encoding='utf-8-sig')
+    print(f"✅ 輸出已儲存至: {out_path}")
+    print()
+    print(df_out.to_string(index=False))
+
+
+if __name__ == '__main__':
+    main()
