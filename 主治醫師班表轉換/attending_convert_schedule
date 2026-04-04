@@ -379,7 +379,7 @@ def write_output(results, num_days, conflicts, anomalies, code_info):
         rows.append(row)
 
     df_out = pd.DataFrame(rows[1:], columns=rows[0])
-    out_path = '詳細班表上傳表_轉換結果.csv'
+    out_path = '主治醫師詳細班表上傳表_轉換結果.csv'
     df_out.to_csv(out_path, index=False, encoding='utf-8-sig')
     print(f"\n✅ 輸出已儲存至: {out_path}")
 
