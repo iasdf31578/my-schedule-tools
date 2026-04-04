@@ -32,8 +32,8 @@ def parse_codes(val):
     return [c for c in s if c.islower()]
 
 def main():
-    df_in   = pd.read_csv('202604住院醫師值班表-手動確認.csv', encoding='big5', header=None)
-    df_main = pd.read_csv('202604麻醉部值班工作表.csv', header=None, encoding='big5')
+    df_in   = pd.read_csv('202604住院醫師值班表-已排平日白班.csv', encoding='big5', header=None)
+    df_main = pd.read_csv('麻醉部值班工作表.csv', header=None, encoding='big5')
 
     # ── 1. 從麻醉部值班工作表解析住院醫師代號對照 ─────────────────────────────
     code_info = {}  # code -> {'name': str, 'emp_id': str}
@@ -198,7 +198,7 @@ def main():
 
     df_out = pd.DataFrame(rows, columns=header)
 
-    out_path = '住院醫師詳細班表_轉換結果.csv'
+    out_path = '住院醫師詳細班表上傳表_轉換結果.csv'
     df_out.to_csv(out_path, index=False, encoding='utf-8-sig')
     print(f'\n✅ 輸出已儲存至: {out_path}')
 
