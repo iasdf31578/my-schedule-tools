@@ -1,0 +1,217 @@
+"""
+住院醫師值班表 → 詳細班表上傳表 轉換程式
+"""
+
+import pandas as pd
+import re
+
+# ── 使用者執行前請手動填入 ────────────────────────────────────────────────────
+
+# 本月國定假日日期（數字），例如清明連假補假：{3, 6}
+NATIONAL_HOLIDAYS = {3, 6}
+
+# 守房間期間（R1）的住院醫師代號，例如 {'j', 'k'}
+# 守房間的R1在週六白班時標 DS 而非 D1/D2
+R1_CODES = set()
+
+# 外訓其他地區（不回來值班）的住院醫師代號，例如 {'m'}
+ET_CODES = set()
+
+# ──────────────────────────────────────────────────────────────────────────────
+
+def cell_content(val):
+    if pd.isna(val):
+        return ''
+    return str(val).strip()
+
+def parse_codes(val):
+    """從欄位中取出所有小寫英文字母代號（忽略括號）。"""
+    if pd.isna(val):
+        return []
+    s = str(val).strip().replace('(', '').replace(')', '')
+    return [c for c in s if c.islower()]
+
+def main():
+    df_in   = pd.read_csv('202604住院醫師值班表-手動確認.csv', encoding='big5', header=None)
+    df_main = pd.read_csv('202604麻醉部值班工作表.csv', header=None, encoding='big5')
+
+    # ── 1. 從麻醉部值班工作表解析住院醫師代號對照 ─────────────────────────────
+    code_info = {}  # code -> {'name': str, 'emp_id': str}
+    for i in range(len(df_main)):
+        raw = cell_content(df_main.iloc[i, 42])
+        if not raw:
+            continue
+        m = re.match(r'([a-z])(.+?)(\d{4,})', raw)
+        if m:
+            code_info[m.group(1)] = {'name': m.group(2), 'emp_id': m.group(3)}
+
+    print('== 住院醫師代號對照 ==')
+    for code, info in sorted(code_info.items()):
+        print(f'  {code}: {info["name"]} ({info["emp_id"]})')
+
+    # ── 2. 從輸入班表找住院醫師欄位 ───────────────────────────────────────────
+    # Row 1 有代號 j, k, m, n, o, r, s, t, u
+    resident_cols = {}
+    for c in range(len(df_in.iloc[1])):
+        v = cell_content(df_in.iloc[1, c])
+        if v and len(v) == 1 and v.islower():
+            resident_cols[v] = c
+
+    print(f'\n住院醫師欄位: {resident_cols}')
+
+    # ── 3. 資料欄位位置（固定於輸入表格）─────────────────────────────────────
+    COL_TP_DUTY  = 2   # 台北值班
+    COL_DS_DUTY  = 3   # 淡水值班
+    COL_TP_OPD   = 4   # 台北門診
+    COL_DS_OPD   = 5   # 淡水門診
+    COL_TP_WBAN  = 6   # 台北白班
+    COL_DS_WBAN  = 7   # 淡水白班
+    COL_OFF      = 10  # OFF（= 輸出的 DO）
+    COL_LEAVE    = 11  # 假
+
+    # ── 4. 逐日轉換 ────────────────────────────────────────────────────────────
+    results   = {code: {} for code in resident_cols}
+    warnings  = []   # [(emp_id, name, day, message)]
+
+    num_days = 0
+    for row_i in range(3, len(df_in)):
+        day_val = cell_content(df_in.iloc[row_i, 0])
+        if not day_val or not day_val.isdigit():
+            continue
+        day = int(day_val)
+        wd  = cell_content(df_in.iloc[row_i, 1])
+        num_days = max(num_days, day)
+
+        is_holiday = day in NATIONAL_HOLIDAYS
+        is_sat     = (wd == '六')
+        is_sun     = (wd == '日')
+
+        tp_duty  = parse_codes(df_in.iloc[row_i, COL_TP_DUTY])
+        ds_duty  = parse_codes(df_in.iloc[row_i, COL_DS_DUTY])
+        tp_opd   = parse_codes(df_in.iloc[row_i, COL_TP_OPD])
+        ds_opd   = parse_codes(df_in.iloc[row_i, COL_DS_OPD])
+        tp_wban  = parse_codes(df_in.iloc[row_i, COL_TP_WBAN])
+        ds_wban  = parse_codes(df_in.iloc[row_i, COL_DS_WBAN])
+        off_list = parse_codes(df_in.iloc[row_i, COL_OFF])
+        leave    = parse_codes(df_in.iloc[row_i, COL_LEAVE])
+
+        for code in resident_cols:
+            info    = code_info.get(code, {'name': code, 'emp_id': '?'})
+            emp_id  = info['emp_id']
+            name    = info['name']
+            is_et   = code in ET_CODES
+            is_r1   = code in R1_CODES
+
+            # 蒐集此人今天出現的所有欄位
+            present = []
+            if code in tp_duty:  present.append('台北值班')
+            if code in ds_duty:  present.append('淡水值班')
+            if code in tp_opd:   present.append('台北門診')
+            if code in ds_opd:   present.append('淡水門診')
+            if code in tp_wban:  present.append('台北白班')
+            if code in ds_wban:  present.append('淡水白班')
+            if code in off_list: present.append('OFF')
+            if code in leave:    present.append('假')
+
+            # ── 轉換邏輯（優先順序由高到低）──────────────────────────────────
+
+            # 外訓其他地區
+            if is_et:
+                symbol = 'ET'
+
+            # 國定假日：S 最優先
+            elif is_holiday:
+                symbol = 'S'
+
+            # 週日
+            elif is_sun:
+                symbol = 'OFF'
+
+            # DO（OFF欄）> 其他
+            elif code in off_list:
+                symbol = 'DO'
+
+            # 週六空白或週六請假 → LS
+            elif is_sat and (not present or present == ['假']):
+                symbol = 'LS'
+
+            # 請假（平日）
+            elif code in leave:
+                symbol = 'V'
+
+            # 值班
+            elif code in tp_duty:
+                symbol = 'DN11'
+            elif code in ds_duty:
+                symbol = 'DN22'
+
+            # 白班（週六 D1/D2 優先於 OS）
+            elif code in tp_wban:
+                if not is_sat:
+                    symbol = 'D'
+                elif is_r1:
+                    symbol = 'DS'
+                else:
+                    symbol = 'D1'
+            elif code in ds_wban:
+                if not is_sat:
+                    symbol = 'D'
+                elif is_r1:
+                    symbol = 'DS'
+                else:
+                    symbol = 'D2'
+
+            # 門診
+            elif code in tp_opd:
+                symbol = 'O1' if not is_sat else 'OS'
+            elif code in ds_opd:
+                symbol = 'O1' if not is_sat else 'OS'
+
+            # 無任何符號（非週六日）
+            else:
+                symbol = '?'
+                warnings.append((emp_id, name, day, '無任何班別符號，請人工確認'))
+
+            # 衝突偵測：同一天符合多種主要類別
+            # 值班者同時出現在白班欄為正常現象，排除此組合
+            main_cats = [c for c in present if c not in ('OFF', '假')]
+            normal_combos = [
+                {'台北值班', '台北白班'}, {'淡水值班', '淡水白班'},
+            ]
+            is_normal = set(main_cats) in normal_combos or set(main_cats).issubset({'台北值班','台北白班'}) or set(main_cats).issubset({'淡水值班','淡水白班'})
+            if len(main_cats) > 1 and not is_normal and symbol not in ('ET', 'S', 'OFF', 'DO'):
+                warnings.append((emp_id, name, day,
+                    f'同時出現多個班別欄位（{", ".join(present)}），已套用優先順序，請人工確認'))
+
+            results[code][day] = symbol
+
+    # ── 5. 輸出 ────────────────────────────────────────────────────────────────
+    header = ['員工代碼', '姓名', '職級', '科別代碼'] + list(range(1, num_days + 1))
+    rows = []
+    for code in sorted(results.keys()):
+        info   = code_info.get(code, {'name': code, 'emp_id': '?'})
+        emp_id = info['emp_id']
+        name   = info['name']
+        sched  = results[code]
+        row    = [emp_id, name, '', ''] + [sched.get(d, '?') for d in range(1, num_days + 1)]
+        rows.append(row)
+
+    df_out = pd.DataFrame(rows, columns=header)
+
+    out_path = '住院醫師詳細班表_轉換結果.csv'
+    df_out.to_csv(out_path, index=False, encoding='utf-8-sig')
+    print(f'\n✅ 輸出已儲存至: {out_path}')
+
+    print('\n== 轉換結果預覽 ==')
+    print(df_out.to_string(index=False))
+
+    # ── 6. 警告 ────────────────────────────────────────────────────────────────
+    if warnings:
+        print(f'\n⚠️  以下 {len(warnings)} 處需人工確認：')
+        for emp_id, name, day, msg in warnings:
+            print(f'   {emp_id} {name} 第{day}天: {msg}')
+    else:
+        print('\n✅ 無需人工確認的項目')
+
+if __name__ == '__main__':
+    main()
