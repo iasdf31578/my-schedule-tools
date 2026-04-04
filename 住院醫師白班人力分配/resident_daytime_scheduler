@@ -35,8 +35,8 @@ PREV_TAIPEI_ONCALL  = "o"   # 上月最後一天台北值班
 PREV_DANSHUI_ONCALL = "j"   # 上月最後一天淡水值班
 
 # ③ 檔案路徑
-INPUT_FILE  = "202604.csv"
-OUTPUT_FILE = "202604_output.csv"
+INPUT_FILE  = "住院醫師值班表"
+OUTPUT_FILE = "住院醫師值班表-已排平日白班人力"
 ENCODING    = "big5"   # 若出現編碼錯誤請改為 "big5" 或 "utf-8-sig"
 
 # ============================================================
