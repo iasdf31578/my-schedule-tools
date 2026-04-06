@@ -32,11 +32,21 @@ def main():
     df_raw = pd.read_csv('202604麻醉部值班工作表.csv',
                          header=None, encoding='big5')
 
+    # ── 動態定位代號欄位 ─────────────────────────────────────────────────────
+    legend_col = None
+    for c in range(len(df_raw.iloc[2])):
+        if str(df_raw.iloc[2, c]).strip() == '代號':
+            legend_col = c
+            break
+    if legend_col is None:
+        raise ValueError("找不到「代號」欄位，請確認原始表格格式")
+    resident_legend_col = legend_col + 1
+
     # ── 2. Parse legend: code → (name, emp_id) ────────────────────────────────
-    # Column 41 has entries like "A陳建全4792"
+    # 主治醫師：「代號」欄，住院醫師：「代號」欄右側一格（動態定位）
     code_info = {}  # code -> {'name': str, 'emp_id': str}
     for i in range(len(df_raw)):
-        raw = cell_content(df_raw.iloc[i, 41])
+        raw = cell_content(df_raw.iloc[i, legend_col])
         if raw and len(raw) >= 2 and raw[0].isupper():
             m = re.match(r'([A-Z])(.+?)(\d{4,})', raw)
             if m:
@@ -114,11 +124,7 @@ def main():
     print(f"\n台北值班V列: {tp_duty_v_col}, 台北門診V列: {tp_opd_v_col}, 台北支援列: {tp_support_col}")
     print(f"淡水值班V列: {ds_duty_v_col}, 淡水門診V列: {ds_opd_v_col}, 淡水支援列: {ds_support_col}")
 
-    # ── 6. Find ICU doctor (code X) ───────────────────────────────────────────
-    icu_code = 'X'
-    icu_info = code_info.get(icu_code)
-    if icu_info:
-        print(f"\nICU醫師: {icu_code} = {icu_info['name']} ({icu_info['emp_id']})")
+
 
     # ── 7. Parse data rows ────────────────────────────────────────────────────
     data_rows = []
@@ -181,7 +187,9 @@ def main():
     anomalies = []   # [(emp_id, name, day, description)]
     results = {}     # emp_id -> {day -> symbol}
 
-    all_codes = sorted(code_info.keys())
+    # 依照麻醉部值班工作表從左到右的欄位順序排列
+    all_codes = [code for code in sorted(code_col.keys(), key=lambda c: code_col[c])
+                 if code in code_info]
 
     for code in all_codes:
         info = code_info[code]
@@ -189,16 +197,7 @@ def main():
         name   = info['name']
         is_taipei   = code in taipei_codes
         is_danshui  = code in danshui_codes
-        is_icu      = (code == icu_code)
-
         day_symbols = {}  # day -> symbol string
-
-        # ICU doctor: mark all days as %
-        if is_icu:
-            for day in range(1, num_days + 1):
-                day_symbols[day] = '%'
-            results[emp_id] = {'name': name, 'code': code, 'schedule': day_symbols}
-            continue
 
         for day in range(1, num_days + 1):
             cell = get_doctor_cell(day, code)
@@ -268,8 +267,10 @@ def main():
                         # Anomaly: blank own cell but appears in opposite zone's duty V or support
                         if ds_duty == code:
                             anomalies.append((emp_id, name, day, f'自己欄位空白，但出現在淡水值班V'))
-                        elif code in tp_sup:
+                        if code in tp_sup:
                             anomalies.append((emp_id, name, day, f'自己欄位空白，但出現在台北支援欄（淡水→台北）'))
+                        if code in ds_sup:
+                            anomalies.append((emp_id, name, day, f'自己欄位空白，但出現在淡水支援欄（台北→淡水）'))
 
             # ── 淡水主院區醫師 ─────────────────────────────────────────────
             elif is_danshui:
@@ -320,7 +321,9 @@ def main():
                         # Anomaly: blank own cell but appears in opposite zone's duty V or support
                         if tp_duty == code:
                             anomalies.append((emp_id, name, day, f'自己欄位空白，但出現在台北值班V'))
-                        elif code in ds_sup:
+                        if code in tp_sup:
+                            anomalies.append((emp_id, name, day, f'自己欄位空白，但出現在台北支援欄（淡水→台北）'))
+                        if code in ds_sup:
                             anomalies.append((emp_id, name, day, f'自己欄位空白，但出現在淡水支援欄（台北→淡水）'))
 
             # Assign today's symbol if not already set by a previous "next_day" assignment
@@ -330,9 +333,12 @@ def main():
                     # Merge with existing (e.g., a T from previous night + today's D1/O)
                     existing = day_symbols[day]
                     # Combine, avoiding duplicate T
-                    merged = merge_symbols(existing, today_sym)
+                    merged, t_dropped = merge_symbols(existing, today_sym)
                     day_symbols[day] = merged
-                    if ',' in merged:
+                    if t_dropped:
+                        conflicts.append((emp_id, name, day,
+                            f'{merged}（T與其他符號衝突，已自動填入{merged}，請確認）'))
+                    elif ',' in merged:
                         conflicts.append((emp_id, name, day, merged))
                 else:
                     day_symbols[day] = today_sym
@@ -345,24 +351,30 @@ def main():
 
         results[emp_id] = {'name': name, 'code': code, 'schedule': day_symbols}
 
-    return results, num_days, conflicts, anomalies, code_info
+    return results, num_days, conflicts, anomalies, code_info, all_codes
 
 
 def merge_symbols(existing, new_sym):
-    """Merge two symbol strings, avoiding duplicates."""
+    """Merge two symbol strings. If T conflicts with O/P/v, drop T and keep the other symbol."""
     parts_existing = [s.strip() for s in existing.split(',') if s.strip()]
     parts_new      = [s.strip() for s in new_sym.split(',') if s.strip()]
     combined = parts_existing.copy()
     for p in parts_new:
         if p not in combined:
             combined.append(p)
-    return ','.join(combined)
+    # 若 T 與 O/P/v 同時出現，捨棄 T，保留其他符號（回傳值附註原始衝突供呼叫端提醒）
+    priority_over_T = {'O', 'P', 'v'}
+    if 'T' in combined and combined != ['T'] and any(s in priority_over_T for s in combined):
+        combined = [s for s in combined if s != 'T']
+        return ','.join(combined), True   # True = T was dropped
+    return ','.join(combined), False
 
 
-def write_output(results, num_days, conflicts, anomalies, code_info):
+def write_output(results, num_days, conflicts, anomalies, code_info, all_codes):
     # Build output rows ordered by emp_id (matching original file order)
     # Use order from code_info
-    ordered_codes = sorted(code_info.keys())
+    # 依照傳入的 all_codes 順序輸出（已為左到右欄位順序）
+    ordered_codes = all_codes
     
     rows = []
     header = ['員工代碼', '姓名'] + [str(d) for d in range(1, num_days + 1)]
@@ -397,7 +409,7 @@ def write_output(results, num_days, conflicts, anomalies, code_info):
 
     # Report conflicts
     if conflicts:
-        print("\n⚠️  以下日期同一位醫師有多個符號（已用逗號合併），請人工確認：")
+        print("\n⚠️  以下日期同一位醫師有多個符號，請人工確認：")
         for emp_id, name, day, syms in conflicts:
             print(f"   {emp_id} {name} 第{day}天: {syms}")
     else:
@@ -405,5 +417,5 @@ def write_output(results, num_days, conflicts, anomalies, code_info):
 
 
 if __name__ == '__main__':
-    results, num_days, conflicts, anomalies, code_info = main()
-    write_output(results, num_days, conflicts, anomalies, code_info)
+    results, num_days, conflicts, anomalies, code_info, all_codes = main()
+    write_output(results, num_days, conflicts, anomalies, code_info, all_codes)
