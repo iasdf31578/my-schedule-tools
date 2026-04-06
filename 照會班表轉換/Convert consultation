@@ -39,12 +39,21 @@ def main():
     df = pd.read_csv('202604麻醉部值班工作表.csv', header=None, encoding='big5')
 
     # ── 1. Parse doctor/resident legends ─────────────────────────────────────
-    # Attending (col 41): "A陳建全4792"
-    # Resident  (col 42): "j郭孟協6313"
+    # 主治醫師：「代號」欄，住院醫師：「代號」欄右側一格（動態定位）
     code_to_empid = {}  # 'A' -> '4792', 'j' -> '6313', etc.
 
+    # ── 動態定位代號欄位 ─────────────────────────────────────────────────────
+    legend_col = None
+    for c in range(len(df.iloc[2])):
+        if str(df.iloc[2, c]).strip() == '代號':
+            legend_col = c
+            break
+    if legend_col is None:
+        raise ValueError("找不到「代號」欄位，請確認原始表格格式")
+    resident_legend_col = legend_col + 1
+
     for i in range(len(df)):
-        for col in [41, 42]:
+        for col in [legend_col, resident_legend_col]:
             raw = cell_content(df.iloc[i, col])
             if not raw:
                 continue
