@@ -32,13 +32,23 @@ def parse_codes(val):
     return [c for c in s if c.islower()]
 
 def main():
-    df_in   = pd.read_csv('202604住院醫師值班表-已排平日白班.csv', encoding='big5', header=None)
-    df_main = pd.read_csv('麻醉部值班工作表.csv', header=None, encoding='big5')
+    df_in   = pd.read_csv('202604住院醫師值班表-手動確認.csv', encoding='big5', header=None)
+    df_main = pd.read_csv('202604麻醉部值班工作表.csv', header=None, encoding='big5')
+
+    # ── 動態定位代號欄位 ─────────────────────────────────────────────────────
+    legend_col = None
+    for c in range(len(df_main.iloc[2])):
+        if str(df_main.iloc[2, c]).strip() == '代號':
+            legend_col = c
+            break
+    if legend_col is None:
+        raise ValueError("找不到「代號」欄位，請確認原始表格格式")
+    resident_legend_col = legend_col + 1
 
     # ── 1. 從麻醉部值班工作表解析住院醫師代號對照 ─────────────────────────────
     code_info = {}  # code -> {'name': str, 'emp_id': str}
     for i in range(len(df_main)):
-        raw = cell_content(df_main.iloc[i, 42])
+        raw = cell_content(df_main.iloc[i, resident_legend_col])
         if not raw:
             continue
         m = re.match(r'([a-z])(.+?)(\d{4,})', raw)
@@ -49,28 +59,34 @@ def main():
     for code, info in sorted(code_info.items()):
         print(f'  {code}: {info["name"]} ({info["emp_id"]})')
 
-    # ── 2. 從輸入班表找住院醫師欄位 ───────────────────────────────────────────
-    # Row 1 有代號 j, k, m, n, o, r, s, t, u
-    resident_cols = {}
-    for c in range(len(df_in.iloc[1])):
-        v = cell_content(df_in.iloc[1, c])
-        if v and len(v) == 1 and v.islower():
-            resident_cols[v] = c
 
-    print(f'\n住院醫師欄位: {resident_cols}')
 
-    # ── 3. 資料欄位位置（固定於輸入表格）─────────────────────────────────────
-    COL_TP_DUTY  = 2   # 台北值班
-    COL_DS_DUTY  = 3   # 淡水值班
-    COL_TP_OPD   = 4   # 台北門診
-    COL_DS_OPD   = 5   # 淡水門診
-    COL_TP_WBAN  = 6   # 台北白班
-    COL_DS_WBAN  = 7   # 淡水白班
-    COL_OFF      = 10  # OFF（= 輸出的 DO）
-    COL_LEAVE    = 11  # 假
+    # ── 3. 動態定位住院醫師輸入班表的欄位 ────────────────────────────────────
+    col_labels = {
+        '台北值班': None, '淡水值班': None,
+        '台北門診': None, '淡水門診': None,
+        '台北白班': None, '淡水白班': None,
+        'OFF':     None, '假':      None,
+    }
+    for c in range(len(df_in.iloc[0])):
+        label = str(df_in.iloc[0, c]).strip()
+        if label in col_labels:
+            col_labels[label] = c
+    missing = [k for k, v in col_labels.items() if v is None]
+    if missing:
+        raise ValueError(f"住院醫師班表找不到欄位：{missing}")
+
+    COL_TP_DUTY  = col_labels['台北值班']
+    COL_DS_DUTY  = col_labels['淡水值班']
+    COL_TP_OPD   = col_labels['台北門診']
+    COL_DS_OPD   = col_labels['淡水門診']
+    COL_TP_WBAN  = col_labels['台北白班']
+    COL_DS_WBAN  = col_labels['淡水白班']
+    COL_OFF      = col_labels['OFF']
+    COL_LEAVE    = col_labels['假']
 
     # ── 4. 逐日轉換 ────────────────────────────────────────────────────────────
-    results   = {code: {} for code in resident_cols}
+    results   = {code: {} for code in code_info}
     warnings  = []   # [(emp_id, name, day, message)]
 
     num_days = 0
@@ -95,7 +111,7 @@ def main():
         off_list = parse_codes(df_in.iloc[row_i, COL_OFF])
         leave    = parse_codes(df_in.iloc[row_i, COL_LEAVE])
 
-        for code in resident_cols:
+        for code in code_info:
             info    = code_info.get(code, {'name': code, 'emp_id': '?'})
             emp_id  = info['emp_id']
             name    = info['name']
@@ -198,7 +214,7 @@ def main():
 
     df_out = pd.DataFrame(rows, columns=header)
 
-    out_path = '住院醫師詳細班表上傳表_轉換結果.csv'
+    out_path = '住院醫師詳細班表_轉換結果.csv'
     df_out.to_csv(out_path, index=False, encoding='utf-8-sig')
     print(f'\n✅ 輸出已儲存至: {out_path}')
 
