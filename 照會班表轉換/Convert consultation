@@ -2,12 +2,12 @@
 麻醉部值班工作表 → 照會班表 轉換程式
 
 邏輯：
-  平日：
+  平日（週一～週五，非國定假日）：
     白天會診V = 當天二線V（台北/淡水各自）
-    白天會診R = 當天值班R（台北/淡水各自）
+    白天會診R = 當天值班R（有則填，無則空白並提醒）
     夜間會診V = 當天值班V
     夜間會診R = 當天值班R
-  假日（六、日及國定假日）：
+  假日（六、日及 NATIONAL_HOLIDAYS 指定的國定假日）：
     白天會診V = 夜間會診V = 當天值班V
     （不填R欄）
 """
@@ -15,14 +15,10 @@
 import pandas as pd
 import re
 
-# ── 可調整：國定假日（格式：日期數字，例如 4 代表 4/4）──────────────────────────
-# 2026年4月：清明節4/4為週六已是假日，無補假
-NATIONAL_HOLIDAYS = set()  # 若有補假或特殊假日在此加入，例如 {3} 代表4/3
-
-# 注意：本科國定假日目前均無住院醫師值班（值班R為空），
-# 因此程式以「有無值班R」判斷白天V用二線或值班V，
-# 國定假日會自動走與六日相同的路徑，無需額外設定。
-# 若未來國定假日開始排住院醫師值班，請將該日加入 NATIONAL_HOLIDAYS。
+# ── 請依當月填入國定假日日期 ────────────────────────────────────────────────
+# 格式：日期數字，例如清明補假 4/3：{3}
+# 六、日已自動視為假日，不需另外填入
+NATIONAL_HOLIDAYS = set()
 
 # ──────────────────────────────────────────────────────────────────────────────
 
@@ -97,6 +93,7 @@ def main():
     HOLIDAY_WEEKDAYS = {'六', '日'}
 
     rows_data = []
+    warnings  = []  # [(day, zone, weekday)]
     for i in range(3, len(df)):
         day_val = cell_content(df.iloc[i, 0])
         if not day_val or not day_val.isdigit():
@@ -127,23 +124,26 @@ def main():
                 return emp
 
         if is_holiday:
-            # 假日：日夜相同，只填V
+            # 假日：日夜相同，只填V，不填R
             rows_data.append({
                 'day': day, 'weekday': weekday, 'is_holiday': True,
-                'tp_day_v':  lookup(tp_v), 'tp_day_r':  '',
+                'tp_day_v':   lookup(tp_v), 'tp_day_r':   '',
                 'tp_night_v': lookup(tp_v), 'tp_night_r': '',
-                'ds_day_v':  lookup(ds_v), 'ds_day_r':  '',
+                'ds_day_v':   lookup(ds_v), 'ds_day_r':   '',
                 'ds_night_v': lookup(ds_v), 'ds_night_r': '',
             })
         else:
-            # 平日：若有值班R，白天V用二線；若無值班R，白天V也用值班V
-            tp_day_v = lookup(tp_2) if tp_r else lookup(tp_v)
-            ds_day_v = lookup(ds_2) if ds_r else lookup(ds_v)
+            # 平日：白天V用二線，夜間V用值班V，R欄用值班R
+            # 若值班R為空白（只有主治值班），提醒使用者手動填入白天照會住院醫師
+            if not tp_r:
+                warnings.append((day, '台北', weekday))
+            if not ds_r:
+                warnings.append((day, '淡水', weekday))
             rows_data.append({
                 'day': day, 'weekday': weekday, 'is_holiday': False,
-                'tp_day_v':  tp_day_v,    'tp_day_r':  lookup(tp_r),
+                'tp_day_v':   lookup(tp_2), 'tp_day_r':   lookup(tp_r),
                 'tp_night_v': lookup(tp_v), 'tp_night_r': lookup(tp_r),
-                'ds_day_v':  ds_day_v,    'ds_day_r':  lookup(ds_r),
+                'ds_day_v':   lookup(ds_2), 'ds_day_r':   lookup(ds_r),
                 'ds_night_v': lookup(ds_v), 'ds_night_r': lookup(ds_r),
             })
 
@@ -188,6 +188,14 @@ def main():
     print(f"\n假日（只填值班V）：{holidays}")
     if NATIONAL_HOLIDAYS:
         print(f"另計國定假日：{sorted(NATIONAL_HOLIDAYS)}")
+
+    # ── 7. Print warnings ─────────────────────────────────────────────────────
+    if warnings:
+        print("\n⚠️  以下平日的住院醫師值班R為空白，請手動填入白天照會住院醫師：")
+        for day, zone, wd in warnings:
+            print(f"   第{day}天（{wd}）{zone}")
+    else:
+        print("\n✅ 所有平日均有住院醫師值班R")
 
 
 if __name__ == '__main__':
