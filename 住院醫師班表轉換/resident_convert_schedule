@@ -92,9 +92,12 @@ def main():
     num_days = 0
     for row_i in range(3, len(df_in)):
         day_val = cell_content(df_in.iloc[row_i, 0])
-        if not day_val or not day_val.isdigit():
+        if not day_val:
             continue
-        day = int(day_val)
+        try:
+            day = int(float(day_val))
+        except ValueError:
+            continue
         wd  = cell_content(df_in.iloc[row_i, 1])
         num_days = max(num_days, day)
 
