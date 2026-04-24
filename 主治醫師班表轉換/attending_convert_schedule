@@ -209,8 +209,12 @@ def main():
 
             symbols = []
 
+            # ── Rule 0: % → 空值（忽略，不填入任何符號）─────────────────
+            if cell == '%':
+                pass  # 轉換為空值，後續由 Rule 3 填入 V
+
             # ── Rule 4: # → P, * → v (applies to all doctors) ──────────────
-            if cell == '#':
+            elif cell == '#':
                 symbols.append('P')
             elif cell == '*':
                 symbols.append('v')
@@ -391,7 +395,7 @@ def write_output(results, num_days, conflicts, anomalies, code_info, all_codes):
         rows.append(row)
 
     df_out = pd.DataFrame(rows[1:], columns=rows[0])
-    out_path = '主治醫師詳細班表上傳表_轉換結果.csv'
+    out_path = '詳細班表上傳表_轉換結果.csv'
     df_out.to_csv(out_path, index=False, encoding='utf-8-sig')
     print(f"\n✅ 輸出已儲存至: {out_path}")
 
@@ -409,7 +413,7 @@ def write_output(results, num_days, conflicts, anomalies, code_info, all_codes):
 
     # Report conflicts
     if conflicts:
-        print("\n⚠️  以下日期同一位醫師有多個符號，請人工確認：")
+        print("\n⚠️  以下日期同一位醫師有多個符號（已用逗號合併），請人工確認：")
         for emp_id, name, day, syms in conflicts:
             print(f"   {emp_id} {name} 第{day}天: {syms}")
     else:
