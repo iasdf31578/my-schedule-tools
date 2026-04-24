@@ -87,9 +87,10 @@ def main():
     rows = []
     for i in range(3, len(df)):
         day_val = cell_content(df.iloc[i, 0])
-        if not day_val or not day_val.isdigit():
+        try:
+            day = int(float(day_val))
+        except ValueError:
             continue
-        day = int(day_val)
 
         # 台北：門診V → 門診R → 白班R 第一個字
         tp_code = (strip_parens(df.iloc[i, tp_opd_v_col]) or
