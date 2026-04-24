@@ -3,6 +3,13 @@
 """
 
 import pandas as pd
+
+# ── 請依當月填入非六日的國定假日日期 ────────────────────────────────────────
+# 格式：日期數字，例如清明補假 4/3：{3}
+# 六、日已自動視為假日，不需另外填入
+NATIONAL_HOLIDAYS = set()
+
+# ──────────────────────────────────────────────────────────────────────────────
 import re
 import sys
 from collections import defaultdict
@@ -294,11 +301,10 @@ def main():
                 # Rule 3: < means at 台北
                 elif cell == '<':
                     if tp_duty == code:
-                        # 有住院醫師值班R = 平日 → N1（只需晚上）並提醒
-                        # 無住院醫師值班R = 假日 → DN1（白天晚上都要上班）
+                        # 依星期及國定假日判斷：週一～週五且非國定假日 = 平日 → N1，否則 → DN1
                         r = get_day_row(day)
-                        tp_r_val = strip_parens(df_raw.iloc[r, tp_duty_r_col]) if r else ''
-                        is_weekday = bool(tp_r_val)
+                        weekday_val = cell_content(df_raw.iloc[r, 1]) if r else ''
+                        is_weekday = weekday_val not in ('六', '日') and day not in NATIONAL_HOLIDAYS
                         if is_weekday:
                             symbols.append('N1')
                             anomalies.append((emp_id, name, day, '淡水醫師當天在台北值班V（平日，標記為N1），請確認當天是否需要上白班'))
