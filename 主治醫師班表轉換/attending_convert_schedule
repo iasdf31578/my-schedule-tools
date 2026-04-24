@@ -93,8 +93,6 @@ def main():
     print(f"淡水醫師: {sorted(danshui_codes)}")
 
     # ── 5. Identify special column positions ──────────────────────────────────
-    # Taipei side: 值班V=col2, 值班R=col3, 門診V=col4, 支援=col24, 白班R=col25
-    # Danshui side: 值班V=col28, 值班R=col29, 門診V=col30, 支援=col39, 白班R=col40
     tp_duty_v_col  = None  # 台北值班V
     tp_duty_r_col  = None  # 台北值班R
     tp_opd_v_col   = None  # 台北門診V
