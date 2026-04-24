@@ -209,9 +209,9 @@ def main():
 
             symbols = []
 
-            # ── Rule 0: % → 空值（忽略，不填入任何符號）─────────────────
+            # ── Rule 0: % → 空值（用哨兵標記，最後輸出為空白）────────────
             if cell == '%':
-                pass  # 轉換為空值，後續由 Rule 3 填入 V
+                day_symbols[day] = '__EMPTY__'
 
             # ── Rule 4: # → P, * → v (applies to all doctors) ──────────────
             elif cell == '#':
@@ -348,10 +348,12 @@ def main():
                     day_symbols[day] = today_sym
             # else: day_symbols[day] may already be set (from T rollover), leave it
 
-        # Rule 3: fill remaining blank days with V
+        # Rule 3: fill remaining blank days with V（% 標記的日子保留空白）
         for day in range(1, num_days + 1):
             if day not in day_symbols or day_symbols[day] == '':
                 day_symbols[day] = 'V'
+            elif day_symbols[day] == '__EMPTY__':
+                day_symbols[day] = ''
 
         results[emp_id] = {'name': name, 'code': code, 'schedule': day_symbols}
 
