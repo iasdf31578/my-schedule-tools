@@ -135,9 +135,10 @@ def main():
     data_rows = []
     for i in range(3, len(df_raw)):
         day_val = cell_content(df_raw.iloc[i, 0])
-        if not day_val or not str(day_val).strip().isdigit():
+        try:
+            day = int(float(day_val))
+        except ValueError:
             continue
-        day = int(day_val)
         data_rows.append((day, i))
 
     num_days = max(d for d, _ in data_rows)
