@@ -1,0 +1,467 @@
+# =========================================================
+# PGY房區表自動化 — 排班引擎
+# 把每個 "# Cell N" 區塊分別貼到 Colab 的不同儲存格依序執行
+# =========================================================
+
+# ---------------------------------------------------------
+# Cell 1：授權登入
+# ---------------------------------------------------------
+from google.colab import auth
+auth.authenticate_user()
+
+import google.auth
+from googleapiclient.discovery import build
+import random
+import re
+
+creds, _ = google.auth.default()
+sheets_service = build('sheets', 'v4', credentials=creds)
+
+
+# ---------------------------------------------------------
+# Cell 2：設定參數（每個月要跑之前，先確認/修改這裡）
+# ---------------------------------------------------------
+ATTENDING_SHEET_ID = "1Wmmn2oo_ofRa0a7fDg5VIhSMpXsLdpr9LoHG15faOWQ"
+PGY_SHEET_ID = "1lgUApz4KGqL_SJkl4SaVwqq0L1Uh_wmB15N4EIJLYI4"
+TARGET_TAB = "202610"  # 兩份表格用同樣的分頁命名規則(年月)
+
+# 台北/淡水房區「硬性排除」關鍵字：欄位標題(第2列)只要包含這些字串就整欄排除
+TAIPEI_HARD_EXCLUDE_KEYWORDS = ["值班", "門診+碎石", "VS-Room-7", "台北白班", "二線"]
+DANSHUI_HARD_EXCLUDE_KEYWORDS = ["16~外", "門診", "特", "值班R", "白班R"]
+
+MENTOR_CONFLICT_PAIRS = [("黃雅嫻", "楊承憲")]  # 導師互斥配對（雙向）
+
+COLOR_TOLERANCE = 0.02
+COLOR_MEANING = {
+    (0.812, 0.886, 0.953): "danshui_marked",   # 淺藍：手動標記的淡水指定日
+    (0.8, 0.8, 0.8): "holiday_gray",           # 灰：週末/假日
+    (1, 1, 0): "personal_vacation",            # 黃：個人休假
+    (0.988, 0.839, 0.408): "pca_day",          # 金黃：PCA訪視教學
+}
+
+RANDOM_SEED = 42       # 固定亂數種子，方便重跑結果一致；改成別的數字可得到不同隨機結果
+DEBUG_WARD_EVAL = False  # True 時會印出每次病房評估決策的詳細過程
+
+
+# ---------------------------------------------------------
+# Cell 3：欄位字母 <-> 數字 轉換
+# ---------------------------------------------------------
+def col_num_to_letter(n):
+    letters = ""
+    while n > 0:
+        n, rem = divmod(n - 1, 26)
+        letters = chr(65 + rem) + letters
+    return letters
+
+
+# ---------------------------------------------------------
+# Cell 4：通用讀取（文字＋底色）與共用小工具
+# ---------------------------------------------------------
+def read_sheet_grid(spreadsheet_id, sheet_name, max_rows, max_cols):
+    """回傳 2D list，grid[r][c] = {'text': str, 'rgb': (r,g,b)}，索引從0開始"""
+    col_letter = col_num_to_letter(max_cols)
+    rng = f"'{sheet_name}'!A1:{col_letter}{max_rows}"
+    result = sheets_service.spreadsheets().get(
+        spreadsheetId=spreadsheet_id,
+        ranges=[rng],
+        fields="sheets.data.rowData.values(formattedValue,userEnteredFormat.backgroundColor)"
+    ).execute()
+
+    row_data = result['sheets'][0]['data'][0].get('rowData', [])
+    grid = []
+    for row in row_data:
+        row_out = []
+        for c in row.get('values', []):
+            bg = c.get('userEnteredFormat', {}).get('backgroundColor')
+            if bg is not None:
+                # 注意：Sheets API 對數值為0的顏色分量會直接省略該欄位(不是回傳0)，
+                # 缺欄位要當作0，不能預設成1，否則會把「省略=0」誤判成白色
+                rgb = (round(bg.get('red', 0), 3), round(bg.get('green', 0), 3), round(bg.get('blue', 0), 3))
+            else:
+                rgb = (1, 1, 1)
+            row_out.append({'text': c.get('formattedValue', '') or '', 'rgb': rgb})
+        grid.append(row_out)
+    return grid
+
+
+def classify_color(rgb):
+    for known, label in COLOR_MEANING.items():
+        if all(abs(a - b) < COLOR_TOLERANCE for a, b in zip(rgb, known)):
+            return label
+    return None
+
+
+def extract_name(text):
+    """主治醫師欄位常是「姓名+房號」(如 '楊承憲1-4')，只取最前面連續的中文字元。"""
+    m = re.match(r'[\u4e00-\u9fff]+', text.strip())
+    return m.group(0) if m else text.strip()
+
+
+def cell(grid, row, col):
+    """1-indexed 存取，超出範圍回傳空白cell"""
+    if row - 1 < len(grid) and col - 1 < len(grid[row - 1]):
+        return grid[row - 1][col - 1]
+    return {'text': '', 'rgb': (1, 1, 1)}
+
+
+# ---------------------------------------------------------
+# Cell 5：解析主治醫師房區表
+# 第2列=各欄標題，第3列起=逐日資料。A欄=日期，C欄起~"台北白班"(含)=台北房區，
+# 其後兩欄是日期鏡像欄(跳過)，再來才是淡水房區。
+# ---------------------------------------------------------
+def parse_attending_sheet(grid, max_cols):
+    header_row = 2
+    labels = {}
+    taipei_cols, danshui_cols = [], []
+    seen_taipei_baiban = False
+    skip_mirror = 0
+    for c in range(3, max_cols + 1):
+        text = cell(grid, header_row, c)['text'].strip()
+        if seen_taipei_baiban and skip_mirror > 0:
+            skip_mirror -= 1
+            continue
+        if not text:
+            continue
+        labels[c] = text
+        if not seen_taipei_baiban:
+            taipei_cols.append(c)
+            if text == "台北白班":
+                seen_taipei_baiban = True
+                skip_mirror = 2  # 接下來兩欄是日期鏡像欄，不是淡水房區
+        else:
+            danshui_cols.append(c)
+
+    daily = {}
+    for r in range(3, len(grid) + 1):
+        day_text = cell(grid, r, 1)['text'].strip()
+        if not day_text.isdigit():
+            continue
+        day_num = int(day_text)
+        taipei_map = {labels[c]: extract_name(cell(grid, r, c)['text'])
+                      for c in taipei_cols if cell(grid, r, c)['text'].strip()}
+        danshui_map = {labels[c]: extract_name(cell(grid, r, c)['text'])
+                       for c in danshui_cols if cell(grid, r, c)['text'].strip()}
+        daily[day_num] = {'taipei': taipei_map, 'danshui': danshui_map}
+
+    return {'taipei_cols': taipei_cols, 'danshui_cols': danshui_cols, 'labels': labels, 'daily': daily}
+
+
+# ---------------------------------------------------------
+# Cell 6：解析PGY房區表
+# 第1列=職級, 第2列=員編, 第3列=姓名, 第4列=導師(上), 第5列=導師(下)
+# 第6列起：A欄=日期, B欄=星期, C欄起=各PGY當天內容, 標題為"備註"的欄位=remarks
+# ---------------------------------------------------------
+def parse_pgy_sheet(grid, max_cols):
+    pgy_cols, remarks_col = [], None
+    for c in range(3, max_cols + 1):
+        header1 = cell(grid, 1, c)['text'].strip()
+        if header1 == "備註":
+            remarks_col = c
+        elif header1:
+            pgy_cols.append(c)
+
+    pgy_info = {}
+    for c in pgy_cols:
+        name = cell(grid, 3, c)['text'].strip()
+        if name:
+            pgy_info[name] = {
+                'col': c,
+                'level': cell(grid, 1, c)['text'].strip(),
+                'empid': cell(grid, 2, c)['text'].strip(),
+                'mentor_up': cell(grid, 4, c)['text'].strip(),
+                'mentor_down': cell(grid, 5, c)['text'].strip(),
+            }
+
+    daily_rows = []
+    for r in range(6, len(grid) + 1):
+        m = re.match(r'(\d{4})/(\d{1,2})/(\d{1,2})', cell(grid, r, 1)['text'].strip())
+        if not m:
+            continue
+        daily_rows.append({
+            'day': int(m.group(3)),
+            'weekday': cell(grid, r, 2)['text'].strip(),
+            'remarks': cell(grid, r, remarks_col)['text'].strip() if remarks_col else '',
+            'cells': {name: cell(grid, r, info['col']) for name, info in pgy_info.items()},
+        })
+
+    return pgy_info, daily_rows
+
+
+# ---------------------------------------------------------
+# Cell 7：讀取兩份表格
+# ---------------------------------------------------------
+attending_grid = read_sheet_grid(ATTENDING_SHEET_ID, TARGET_TAB, max_rows=33, max_cols=27)
+attending_data = parse_attending_sheet(attending_grid, max_cols=27)
+
+pgy_grid = read_sheet_grid(PGY_SHEET_ID, TARGET_TAB, max_rows=40, max_cols=26)
+pgy_info, pgy_daily_rows = parse_pgy_sheet(pgy_grid, max_cols=26)
+
+print("解析到的PGY：")
+for name, info in pgy_info.items():
+    print(f"  {name}  職級={info['level']}  導師(上)={info['mentor_up']}  導師(下)={info['mentor_down']}")
+print(f"\n台北房區欄位: {[attending_data['labels'][c] for c in attending_data['taipei_cols']]}")
+print(f"淡水房區欄位: {[attending_data['labels'][c] for c in attending_data['danshui_cols']]}")
+print(f"\n共讀到 {len(pgy_daily_rows)} 天的PGY表資料")
+
+
+# ---------------------------------------------------------
+# Cell 8：共用判斷函式
+# ---------------------------------------------------------
+def is_hard_excluded(label, keywords):
+    return any(kw in label for kw in keywords)
+
+
+def mentor_conflict(pgy_name, attending_name):
+    mentors = {pgy_info[pgy_name]['mentor_up'], pgy_info[pgy_name]['mentor_down']}
+    for a, b in MENTOR_CONFLICT_PAIRS:
+        if (a in mentors and attending_name == b) or (b in mentors and attending_name == a):
+            return True
+    return False
+
+
+# ---------------------------------------------------------
+# Cell 9：主排班引擎
+# ---------------------------------------------------------
+def generate_schedule():
+    random.seed(RANDOM_SEED)
+
+    days_sorted = sorted(attending_data['daily'].keys())
+    first_day, last_day = min(days_sorted), max(days_sorted)
+    pgy_fixed_order = list(pgy_info.keys())  # 麻評門診固定依此左到右順序輪流
+
+    clinic_done = {name: False for name in pgy_info}
+    ward_eval_count = {name: 0 for name in pgy_info}
+    mentor_met_early = {name: False for name in pgy_info}   # 前兩週是否已遇過任一導師
+    mentor_meet_total = {name: 0 for name in pgy_info}
+
+    # 假日判斷：PGY表格裡當天所有人的儲存格都是灰色，就算假日
+    holiday_days = {row['day'] for row in pgy_daily_rows
+                    if row['cells'] and all(classify_color(c['rgb']) == 'holiday_gray' for c in row['cells'].values())}
+
+    # 本月最後一個工作天：從月底往前跳過連續假日
+    last_working_day = last_day
+    while last_working_day in holiday_days and last_working_day > first_day:
+        last_working_day -= 1
+
+    def mark_mentor_meeting(name, att_name, day):
+        if att_name in (pgy_info[name]['mentor_up'], pgy_info[name]['mentor_down']):
+            mentor_meet_total[name] += 1
+            if day - first_day < 14:
+                mentor_met_early[name] = True
+
+    output = {}  # output[day][pgy_name] = {'text':.., 'color':label}
+
+    for day in days_sorted:
+        output[day] = {}
+        used_attendings = set()  # 今天已被配走的醫師(不分台北/淡水)，避免同一人配給兩位PGY
+        att_today = attending_data['daily'][day]
+        pgy_row = next((r for r in pgy_daily_rows if r['day'] == day), None)
+        is_pca_day = (day == first_day)
+        is_last_day = (day == last_day)
+
+        def pick_color(name, ward_eval_pgy):
+            if name == ward_eval_pgy:
+                return 'ward_eval'
+            return 'pca' if is_pca_day else 'normal'
+
+        # -- 判斷每位PGY今天的預先狀態(休假/淡水/一般) --
+        vacation_today, danshui_today, pending_today = set(), set(), set()
+        for name in pgy_info:
+            existing = pgy_row['cells'][name] if pgy_row else {'text': '', 'rgb': (1, 1, 1)}
+            status = classify_color(existing['rgb'])
+            if existing['text'].strip() == '休假' or status in ('holiday_gray', 'personal_vacation'):
+                vacation_today.add(name)
+            elif status == 'danshui_marked':
+                danshui_today.add(name)
+            else:
+                pending_today.add(name)
+
+        # -- 休假：原封不動照抄原本的文字跟顏色 --
+        for name in vacation_today:
+            existing = pgy_row['cells'][name] if pgy_row else {'text': '', 'rgb': (1, 1, 1)}
+            output[day][name] = {'text': existing['text'], 'color': 'raw', 'rgb': existing['rgb']}
+
+        # -- 淡水指定日：找淡水可用醫師 --
+        for name in danshui_today:
+            candidates = list({
+                dn for label, dn in att_today['danshui'].items()
+                if not is_hard_excluded(label, DANSHUI_HARD_EXCLUDE_KEYWORDS)
+                and not mentor_conflict(name, dn) and dn not in used_attendings
+            })
+            if candidates:
+                chosen = random.choice(candidates)
+                used_attendings.add(chosen)
+                output[day][name] = {'text': chosen, 'color': 'danshui'}
+                mark_mentor_meeting(name, chosen, day)
+            else:
+                output[day][name] = {'text': '', 'color': 'danshui'}
+                print(f"[警告] {day}日 {name} 淡水指定日找不到可用醫師(可能都被導師互斥規則排除或都被同天其他人選走)，請手動確認")
+
+        need_room_pool = set(pending_today)  # 今天需要台北房區的人
+        ward_eval_pgy = None
+
+        if not is_pca_day and not is_last_day:
+            # 麻評門診：固定依左到右欄位順序輪流，跟任何次數無關
+            clinic_candidates = [n for n in pgy_fixed_order if n in need_room_pool and not clinic_done[n]]
+            if clinic_candidates:
+                clinic_pgy = clinic_candidates[0]
+                clinic_done[clinic_pgy] = True
+                output[day][clinic_pgy] = {'text': '麻評門診', 'color': 'clinic'}
+                need_room_pool.discard(clinic_pgy)
+
+            # 病房評估：已排過門診、次數<3、不是假日後第一個工作天、不是本月最後工作天
+            is_day_after_holiday = (day - 1) in holiday_days
+            is_last_working_day = (day == last_working_day)
+            if not (is_day_after_holiday or is_last_working_day):
+                ward_candidates = [n for n in need_room_pool if clinic_done[n] and ward_eval_count[n] < 3]
+                if ward_candidates:
+                    pgy2_names = [n for n in ward_candidates if pgy_info[n]['level'] == 'PGY2']
+                    if any(ward_eval_count[n] < 2 for n in ward_candidates):
+                        pool, reason = [n for n in ward_candidates if ward_eval_count[n] < 2], "有人未滿2次，優先未滿2次者"
+                    elif pgy2_names:
+                        pool, reason = pgy2_names, "大家都滿2次了，優先PGY2"
+                    else:
+                        pool, reason = ward_candidates, "大家都滿2次、且今天沒有PGY2符合資格，只好從剩下的人選"
+                    min_count = min(ward_eval_count[n] for n in pool)
+                    tied = [n for n in pool if ward_eval_count[n] == min_count]
+                    ward_eval_pgy = random.choice(tied)
+                    if DEBUG_WARD_EVAL:
+                        print(f"[病房評估決策] {day}日：候選={[(n, pgy_info[n]['level'], ward_eval_count[n]) for n in ward_candidates]}  "
+                              f"篩選邏輯={reason}  平手者={tied}  最終選中={ward_eval_pgy}")
+                    ward_eval_count[ward_eval_pgy] += 1
+                    # 病房評估的人仍留在 need_room_pool，稍後照樣配房區
+
+        # -- 台北房區配對：先以「醫師姓名」為單位去重，排除今天已被淡水/其他人用掉的醫師 --
+        taipei_attending_pool = {}
+        for label, att_name in att_today['taipei'].items():
+            if not is_hard_excluded(label, TAIPEI_HARD_EXCLUDE_KEYWORDS) and att_name not in used_attendings:
+                taipei_attending_pool.setdefault(att_name, label)
+        available_rooms = {label: name for name, label in taipei_attending_pool.items()}
+
+        remaining_pgy = list(need_room_pool)
+        random.shuffle(remaining_pgy)
+        remaining_pgy.sort(key=lambda n: mentor_met_early[n])  # 未在前兩週遇過導師的人優先處理
+
+        # 第一輪：導師優先
+        assigned_labels, still_unassigned = set(), []
+        for name in remaining_pgy:
+            mentors = {pgy_info[name]['mentor_up'], pgy_info[name]['mentor_down']}
+            found_label = next((l for l, a in available_rooms.items() if l not in assigned_labels and a in mentors), None)
+            if found_label:
+                att_name = available_rooms[found_label]
+                assigned_labels.add(found_label)
+                used_attendings.add(att_name)
+                output[day][name] = {'text': att_name, 'color': pick_color(name, ward_eval_pgy)}
+                mark_mentor_meeting(name, att_name, day)
+            else:
+                still_unassigned.append(name)
+
+        # 第二輪：剩下隨機配對，並檢查導師互斥
+        free_labels = [l for l in available_rooms if l not in assigned_labels]
+        random.shuffle(free_labels)
+        for name in still_unassigned:
+            chosen_label = next((l for l in free_labels if not mentor_conflict(name, available_rooms[l])), None)
+            if chosen_label:
+                free_labels.remove(chosen_label)
+                att_name = available_rooms[chosen_label]
+                used_attendings.add(att_name)
+                output[day][name] = {'text': att_name, 'color': pick_color(name, ward_eval_pgy)}
+            else:
+                output[day][name] = {'text': '', 'color': 'unassigned'}
+                print(f"[警告] {day}日 {name} 找不到可配對的房區(可能房區數不夠或都導師互斥)，請手動確認")
+
+    return output, clinic_done, ward_eval_count, mentor_meet_total
+
+
+schedule_output, clinic_done, ward_eval_count, mentor_meet_total = generate_schedule()
+
+print("\n=== 統計結果 ===")
+for name in pgy_info:
+    print(f"{name}: 麻評門診已排={clinic_done[name]}, 病房評估次數={ward_eval_count[name]}, 導師碰面次數={mentor_meet_total[name]}")
+
+
+# ---------------------------------------------------------
+# Cell 10：把 schedule_output 寫成新的 Google Sheet(含底色)，放在你的 Drive 首頁
+# ---------------------------------------------------------
+OUTPUT_COLOR_RGB = {
+    'pca': (0.988, 0.839, 0.408),
+    'clinic': (0.902, 0.722, 0.686),
+    'ward_eval': (1, 0.655, 0.4),
+    'danshui': (0.812, 0.886, 0.953),
+    'unassigned': (1, 0, 0),   # 程式排不出來，需要手動處理
+    # 'normal' 不特別上色；'raw' 用原始顏色，見 build_output_spreadsheet
+}
+
+day_to_weekday = {r['day']: r['weekday'] for r in pgy_daily_rows}
+day_to_remarks = {r['day']: r['remarks'] for r in pgy_daily_rows}
+
+
+def build_output_spreadsheet():
+    year, month = int(TARGET_TAB[:4]), int(TARGET_TAB[4:])
+    pgy_names_ordered = list(pgy_info.keys())
+
+    new_ss = sheets_service.spreadsheets().create(body={
+        "properties": {"title": f"{TARGET_TAB} PGY房區表(自動產生)"},
+        "sheets": [{"properties": {"title": TARGET_TAB}}]
+    }).execute()
+    spreadsheet_id = new_ss['spreadsheetId']
+    sheet_id = new_ss['sheets'][0]['properties']['sheetId']
+
+    def text_cell(value):
+        return {"userEnteredValue": {"stringValue": value}}
+
+    def colored_cell(value, rgb):
+        c = {"userEnteredValue": {"stringValue": value}}
+        if rgb is not None:
+            r, g, b = rgb
+            c["userEnteredFormat"] = {"backgroundColor": {"red": r, "green": g, "blue": b}}
+        return c
+
+    def header_row(col_b_label, value_func):
+        row = [text_cell(""), text_cell(col_b_label)]
+        row += [text_cell(value_func(n)) for n in pgy_names_ordered]
+        row.append(text_cell(""))
+        return {"values": row}
+
+    row1 = [text_cell(f"{month}月 PGY 房區(自動產生)"), text_cell("")]
+    row1 += [text_cell(pgy_info[n]['level']) for n in pgy_names_ordered]
+    row1.append(text_cell("備註"))
+
+    rows = [
+        {"values": row1},
+        header_row("", lambda n: pgy_info[n]['empid']),
+        header_row("", lambda n: n),
+        header_row("導師(上)", lambda n: pgy_info[n]['mentor_up']),
+        header_row("導師(下)", lambda n: pgy_info[n]['mentor_down']),
+    ]
+
+    for day in sorted(schedule_output.keys()):
+        row = [text_cell(f"{year}/{month}/{day}"), text_cell(day_to_weekday.get(day, ""))]
+        for name in pgy_names_ordered:
+            info = schedule_output[day].get(name, {'text': '', 'color': 'normal'})
+            if info['color'] == 'raw':
+                rgb = info.get('rgb')
+                rgb = None if rgb == (1, 1, 1) else rgb  # 原本白底就不特別上色
+            else:
+                rgb = OUTPUT_COLOR_RGB.get(info['color'])
+            row.append(colored_cell(info['text'], rgb))
+        row.append(text_cell(day_to_remarks.get(day, "")))
+        rows.append({"values": row})
+
+    sheets_service.spreadsheets().batchUpdate(
+        spreadsheetId=spreadsheet_id,
+        body={"requests": [{
+            "updateCells": {
+                "rows": rows,
+                "fields": "userEnteredValue,userEnteredFormat.backgroundColor",
+                "start": {"sheetId": sheet_id, "rowIndex": 0, "columnIndex": 0}
+            }
+        }]}
+    ).execute()
+
+    url = f"https://docs.google.com/spreadsheets/d/{spreadsheet_id}/edit"
+    print(f"完成！新表格連結：{url}")
+    return url
+
+
+output_url = build_output_spreadsheet()
