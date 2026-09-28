@@ -1,6 +1,6 @@
 # PGY房區表自動化
 
-用 Python(Google Colab)讀取「主治醫師房區表」跟「PGY房區表」兩份 Google Sheet,套用排班規則,自動產生下個月的 PGY 房區分配,輸出成一份新的 Google Sheet。
+用 Python(Google Colab)讀取「房區」跟「PGY房區表」兩份 Google Sheet,套用排班規則,自動產生下個月的 PGY 房區分配,輸出成一份新的 Google Sheet。
 
 ## 使用方式
 
