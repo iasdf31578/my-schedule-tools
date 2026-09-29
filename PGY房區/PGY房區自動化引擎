@@ -238,11 +238,6 @@ def generate_schedule():
     holiday_days = {row['day'] for row in pgy_daily_rows
                     if row['cells'] and all(classify_color(c['rgb']) == 'holiday_gray' for c in row['cells'].values())}
 
-    # 本月最後一個工作天：從月底往前跳過連續假日
-    last_working_day = last_day
-    while last_working_day in holiday_days and last_working_day > first_day:
-        last_working_day -= 1
-
     def mark_mentor_meeting(name, att_name, day):
         if att_name in (pgy_info[name]['mentor_up'], pgy_info[name]['mentor_down']):
             mentor_meet_total[name] += 1
@@ -309,10 +304,9 @@ def generate_schedule():
                 output[day][clinic_pgy] = {'text': '麻評門診', 'color': 'clinic'}
                 need_room_pool.discard(clinic_pgy)
 
-            # 病房評估：已排過門診、次數<3、不是假日後第一個工作天、不是本月最後工作天
+            # 病房評估：已排過門診、次數<3、不是假日後第一個工作天
             is_day_after_holiday = (day - 1) in holiday_days
-            is_last_working_day = (day == last_working_day)
-            if not (is_day_after_holiday or is_last_working_day):
+            if not is_day_after_holiday:
                 ward_candidates = [n for n in need_room_pool if clinic_done[n] and ward_eval_count[n] < 3]
                 if ward_candidates:
                     pgy2_names = [n for n in ward_candidates if pgy_info[n]['level'] == 'PGY2']
